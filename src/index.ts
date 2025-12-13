@@ -5,6 +5,7 @@ import uploadRouter from './routes/upload.js'
 import postsRouter from './routes/posts.js'
 import categoriesRouter from './routes/categories.js'
 import profileRouter from './routes/profile.js'
+import skinsRouter from './routes/skins.js'
 
 const app = express()
 
@@ -20,6 +21,7 @@ app.use('/api/upload', uploadRouter)
 app.use('/api/posts', postsRouter)
 app.use('/api/categories', categoriesRouter)
 app.use('/api/profile', profileRouter)
+app.use('/api/skins', skinsRouter)
 
 // Health check
 app.get('/health', (req, res) => {
