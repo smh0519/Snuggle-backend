@@ -4,13 +4,77 @@ import { createAuthenticatedClient, supabase } from '../services/supabase.servic
 
 const router = Router()
 
-// 시스템 스킨 목록 조회 (인증 불필요)
+// 사용자가 사용 가능한 스킨 목록 조회 (기본 제공 + 다운로드한 스킨)
 router.get('/', async (req, res): Promise<void> => {
+  try {
+    const authHeader = req.headers.authorization
+    let userId: string | null = null
+
+    // 인증된 사용자인 경우 토큰에서 사용자 ID 추출
+    if (authHeader?.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1]
+      const authClient = createAuthenticatedClient(token)
+      const { data: { user } } = await authClient.auth.getUser()
+      userId = user?.id || null
+    }
+
+    // 기본 제공 스킨 조회
+    const { data: defaultSkins, error: defaultError } = await supabase
+      .from('blog_skins')
+      .select('id, name, description, thumbnail_url, is_system, is_default, css_variables, layout_config, created_at')
+      .eq('is_system', true)
+      .eq('is_default', true)
+      .order('created_at')
+
+    if (defaultError) {
+      res.status(500).json({ error: defaultError.message })
+      return
+    }
+
+    let downloadedSkins: typeof defaultSkins = []
+
+    // 로그인한 사용자인 경우 다운로드한 스킨도 조회
+    if (userId) {
+      const { data: library } = await supabase
+        .from('user_skin_library')
+        .select('skin_id')
+        .eq('user_id', userId)
+
+      if (library && library.length > 0) {
+        const skinIds = library.map(l => l.skin_id)
+        const { data: userSkins } = await supabase
+          .from('blog_skins')
+          .select('id, name, description, thumbnail_url, is_system, is_default, css_variables, layout_config, created_at')
+          .in('id', skinIds)
+          .order('created_at')
+
+        downloadedSkins = userSkins || []
+      }
+    }
+
+    // 중복 제거 후 합치기
+    const allSkins = [...defaultSkins]
+    for (const skin of downloadedSkins) {
+      if (!allSkins.find(s => s.id === skin.id)) {
+        allSkins.push(skin)
+      }
+    }
+
+    res.json(allSkins)
+  } catch (error) {
+    console.error('Get skins error:', error)
+    res.status(500).json({ error: 'Failed to get skins' })
+  }
+})
+
+// 마켓플레이스 스킨 목록 조회 (다운로드 가능한 스킨)
+router.get('/marketplace', async (req, res): Promise<void> => {
   try {
     const { data, error } = await supabase
       .from('blog_skins')
-      .select('id, name, description, thumbnail_url, is_system, css_variables, layout_config, created_at')
+      .select('id, name, description, thumbnail_url, is_system, is_default, css_variables, layout_config, created_at')
       .eq('is_system', true)
+      .eq('is_default', false)
       .order('created_at')
 
     if (error) {
@@ -20,8 +84,86 @@ router.get('/', async (req, res): Promise<void> => {
 
     res.json(data)
   } catch (error) {
-    console.error('Get skins error:', error)
-    res.status(500).json({ error: 'Failed to get skins' })
+    console.error('Get marketplace skins error:', error)
+    res.status(500).json({ error: 'Failed to get marketplace skins' })
+  }
+})
+
+// 사용자의 스킨 라이브러리 조회 (다운로드한 스킨 ID 목록)
+router.get('/library', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!
+
+    const { data, error } = await supabase
+      .from('user_skin_library')
+      .select('skin_id, downloaded_at')
+      .eq('user_id', user.id)
+
+    if (error) {
+      res.status(500).json({ error: error.message })
+      return
+    }
+
+    res.json(data || [])
+  } catch (error) {
+    console.error('Get skin library error:', error)
+    res.status(500).json({ error: 'Failed to get skin library' })
+  }
+})
+
+// 스킨 다운로드 (라이브러리에 추가)
+router.post('/download/:skinId', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!
+    const { skinId } = req.params
+
+    // 스킨 존재 확인
+    const { data: skin } = await supabase
+      .from('blog_skins')
+      .select('id, is_system')
+      .eq('id', skinId)
+      .single()
+
+    if (!skin) {
+      res.status(404).json({ error: 'Skin not found' })
+      return
+    }
+
+    const token = req.headers.authorization!.split(' ')[1]
+    const authClient = createAuthenticatedClient(token)
+
+    // 이미 다운로드했는지 확인
+    const { data: existing } = await supabase
+      .from('user_skin_library')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('skin_id', skinId)
+      .single()
+
+    if (existing) {
+      res.status(400).json({ error: 'Already downloaded' })
+      return
+    }
+
+    // 라이브러리에 추가
+    const { data, error } = await authClient
+      .from('user_skin_library')
+      .insert({
+        user_id: user.id,
+        skin_id: skinId,
+      })
+      .select()
+      .single()
+
+    if (error) {
+      res.status(500).json({ error: error.message })
+      return
+    }
+
+    res.json(data)
+  } catch (error) {
+    console.error('Download skin error:', error)
+    res.status(500).json({ error: 'Failed to download skin' })
   }
 })
 
