@@ -11,9 +11,10 @@ router.get('/', async (req, res): Promise<void> => {
     let userId: string | null = null
 
     // 인증된 사용자인 경우 토큰에서 사용자 ID 추출
+    let authClient = null
     if (authHeader?.startsWith('Bearer ')) {
       const token = authHeader.split(' ')[1]
-      const authClient = createAuthenticatedClient(token)
+      authClient = createAuthenticatedClient(token)
       const { data: { user } } = await authClient.auth.getUser()
       userId = user?.id || null
     }
@@ -33,9 +34,9 @@ router.get('/', async (req, res): Promise<void> => {
 
     let downloadedSkins: typeof defaultSkins = []
 
-    // 로그인한 사용자인 경우 다운로드한 스킨도 조회
-    if (userId) {
-      const { data: library } = await supabase
+    // 로그인한 사용자인 경우 다운로드한 스킨도 조회 (인증된 클라이언트 사용)
+    if (userId && authClient) {
+      const { data: library } = await authClient
         .from('user_skin_library')
         .select('skin_id')
         .eq('user_id', userId)
@@ -93,8 +94,10 @@ router.get('/marketplace', async (req, res): Promise<void> => {
 router.get('/library', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!
+    const token = req.headers.authorization!.split(' ')[1]
+    const authClient = createAuthenticatedClient(token)
 
-    const { data, error } = await supabase
+    const { data, error } = await authClient
       .from('user_skin_library')
       .select('skin_id, downloaded_at')
       .eq('user_id', user.id)
@@ -132,13 +135,17 @@ router.post('/download/:skinId', authMiddleware, async (req: AuthenticatedReques
     const token = req.headers.authorization!.split(' ')[1]
     const authClient = createAuthenticatedClient(token)
 
-    // 이미 다운로드했는지 확인
-    const { data: existing } = await supabase
+    // 이미 다운로드했는지 확인 (인증된 클라이언트 사용)
+    const { data: existing, error: checkError } = await authClient
       .from('user_skin_library')
       .select('id')
       .eq('user_id', user.id)
       .eq('skin_id', skinId)
-      .single()
+      .maybeSingle()
+
+    if (checkError) {
+      console.error('Check existing error:', checkError)
+    }
 
     if (existing) {
       res.status(400).json({ error: 'Already downloaded' })
