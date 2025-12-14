@@ -6,6 +6,7 @@ import postsRouter from './routes/posts.js'
 import categoriesRouter from './routes/categories.js'
 import profileRouter from './routes/profile.js'
 import skinsRouter from './routes/skins.js'
+import searchRouter from './routes/search.js'
 
 const app = express()
 
@@ -22,6 +23,7 @@ app.use('/api/posts', postsRouter)
 app.use('/api/categories', categoriesRouter)
 app.use('/api/profile', profileRouter)
 app.use('/api/skins', skinsRouter)
+app.use('/api/search', searchRouter)
 
 // Health check
 app.get('/health', (req, res) => {
