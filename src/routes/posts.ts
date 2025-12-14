@@ -35,7 +35,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           .from('blogs')
           .select('name, thumbnail_url')
           .eq('id', post.blog_id)
-          .single()
+          .maybeSingle()
 
         return {
           ...post,
@@ -123,7 +123,7 @@ router.get('/:id', async (req: Request, res: Response): Promise<void> => {
       .from('blogs')
       .select('id, user_id, name, thumbnail_url')
       .eq('id', post.blog_id)
-      .single()
+      .maybeSingle()
 
     if (!blog) {
       res.status(404).json({ error: 'Blog not found' })
