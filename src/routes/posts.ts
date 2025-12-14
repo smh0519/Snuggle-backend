@@ -70,7 +70,7 @@ router.get('/blog/:blogId', async (req: Request, res: Response): Promise<void> =
           .from('blogs')
           .select('user_id')
           .eq('id', blogId)
-          .single()
+          .maybeSingle()
 
         isOwner = blog?.user_id === user.id
       }
@@ -163,7 +163,7 @@ router.get('/:id', async (req: Request, res: Response): Promise<void> => {
       .from('profiles')
       .select('id, nickname, profile_image_url')
       .eq('id', blog.user_id)
-      .single()
+      .maybeSingle()
 
     res.json({
       ...post,
