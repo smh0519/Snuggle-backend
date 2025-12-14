@@ -6,7 +6,11 @@ import postsRouter from './routes/posts.js'
 import categoriesRouter from './routes/categories.js'
 import profileRouter from './routes/profile.js'
 import skinsRouter from './routes/skins.js'
+<<<<<<< HEAD
 import visitorRouter from './routes/visitors.js'
+=======
+import searchRouter from './routes/search.js'
+>>>>>>> a681dcba736b0cd6baae398404e323eaba909490
 
 const app = express()
 
@@ -23,7 +27,11 @@ app.use('/api/posts', postsRouter)
 app.use('/api/categories', categoriesRouter)
 app.use('/api/profile', profileRouter)
 app.use('/api/skins', skinsRouter)
+<<<<<<< HEAD
 app.use('/api/visitors', visitorRouter)
+=======
+app.use('/api/search', searchRouter)
+>>>>>>> a681dcba736b0cd6baae398404e323eaba909490
 
 // Health check
 app.get('/health', (req, res) => {
