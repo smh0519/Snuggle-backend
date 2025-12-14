@@ -10,11 +10,80 @@ function extractFirstImageUrl(content: string): string | null {
   return imgMatch ? imgMatch[1] : null
 }
 
+// 파라미터 검증 헬퍼 함수
+function validatePagination(limitStr: string | undefined, offsetStr: string | undefined): { limit: number; offset: number } {
+  const limit = Math.min(Math.max(1, parseInt(limitStr as string) || 20), 100)
+  const offset = Math.max(0, parseInt(offsetStr as string) || 0)
+  return { limit, offset }
+}
+
+// 피드 게시글 목록 (구독한 블로그의 글, 인증 필요)
+router.get('/feed', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!
+    const { limit, offset } = validatePagination(req.query.limit as string, req.query.offset as string)
+
+    // 구독한 사용자 목록 가져오기
+    const { data: subscriptions } = await supabase
+      .from('subscribe')
+      .select('subed_id')
+      .eq('sub_id', user.id)
+
+    const subscribedUserIds = (subscriptions || []).map(s => s.subed_id)
+
+    if (subscribedUserIds.length === 0) {
+      res.json([])
+      return
+    }
+
+    // 구독한 사용자들의 블로그 가져오기
+    const { data: blogs } = await supabase
+      .from('blogs')
+      .select('id, name, thumbnail_url, user_id')
+      .in('user_id', subscribedUserIds)
+
+    if (!blogs || blogs.length === 0) {
+      res.json([])
+      return
+    }
+
+    const blogIds = blogs.map(b => b.id)
+    const blogMap = new Map(blogs.map(b => [b.id, b]))
+
+    // 해당 블로그들의 공개 게시글 가져오기
+    const { data: posts, error } = await supabase
+      .from('posts')
+      .select('id, title, content, thumbnail_url, created_at, blog_id')
+      .in('blog_id', blogIds)
+      .eq('published', true)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1)
+
+    if (error) {
+      res.status(500).json({ error: error.message })
+      return
+    }
+
+    // 블로그 정보 매핑 (N+1 쿼리 방지)
+    const postsWithDetails = (posts || []).map(post => {
+      const blog = blogMap.get(post.blog_id)
+      return {
+        ...post,
+        blog: blog ? { name: blog.name, thumbnail_url: blog.thumbnail_url } : null,
+      }
+    })
+
+    res.json(postsWithDetails)
+  } catch (error) {
+    console.error('Get feed error:', error)
+    res.status(500).json({ error: 'Failed to get feed' })
+  }
+})
+
 // 전체 게시글 목록 (공개글만, 인증 불필요)
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
-    const limit = parseInt(req.query.limit as string) || 20
-    const offset = parseInt(req.query.offset as string) || 0
+    const { limit, offset } = validatePagination(req.query.limit as string, req.query.offset as string)
 
     const { data: posts, error } = await supabase
       .from('posts')
@@ -28,21 +97,22 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
-    // 각 포스트의 블로그 정보 가져오기
-    const postsWithDetails = await Promise.all(
-      (posts || []).map(async (post) => {
-        const { data: blog } = await supabase
-          .from('blogs')
-          .select('name, thumbnail_url')
-          .eq('id', post.blog_id)
-          .single()
+    // 블로그 ID 목록 추출 및 일괄 조회 (N+1 쿼리 방지)
+    const blogIds = [...new Set((posts || []).map(p => p.blog_id))]
+    const { data: blogs } = await supabase
+      .from('blogs')
+      .select('id, name, thumbnail_url')
+      .in('id', blogIds)
 
-        return {
-          ...post,
-          blog: blog ? { name: blog.name, thumbnail_url: blog.thumbnail_url } : null,
-        }
-      })
-    )
+    const blogMap = new Map((blogs || []).map(b => [b.id, b]))
+
+    const postsWithDetails = (posts || []).map(post => {
+      const blog = blogMap.get(post.blog_id)
+      return {
+        ...post,
+        blog: blog ? { name: blog.name, thumbnail_url: blog.thumbnail_url } : null,
+      }
+    })
 
     res.json(postsWithDetails)
   } catch (error) {
@@ -181,19 +251,23 @@ router.get('/:id', async (req: Request, res: Response): Promise<void> => {
 router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!
-    const { blog_id, title, content, category_ids, published } = req.body
+    const { blog_id, title, content, category_ids, published, is_allow_comment, is_private } = req.body
 
     if (!blog_id || !title) {
       res.status(400).json({ error: 'blog_id and title are required' })
       return
     }
 
+    // 입력값 길이 검증
+    const validatedTitle = title.trim().slice(0, 200)
+    const validatedContent = content ? content.slice(0, 100000) : ''
+
     // 블로그 소유자 확인
     const { data: blog } = await supabase
       .from('blogs')
       .select('user_id')
       .eq('id', blog_id)
-      .single()
+      .maybeSingle()
 
     if (!blog || blog.user_id !== user.id) {
       res.status(403).json({ error: 'Not authorized to post to this blog' })
@@ -204,16 +278,18 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
     const authClient = createAuthenticatedClient(token)
 
     // content에서 첫 번째 이미지를 썸네일로 추출
-    const thumbnailUrl = content ? extractFirstImageUrl(content) : null
+    const thumbnailUrl = validatedContent ? extractFirstImageUrl(validatedContent) : null
 
     const { data, error } = await authClient
       .from('posts')
       .insert({
         blog_id,
         user_id: user.id,
-        title: title.trim(),
-        content: content || '',
+        title: validatedTitle,
+        content: validatedContent,
         published: published ?? true,
+        is_allow_comment: is_allow_comment ?? true,
+        is_private: is_private ?? false,
         thumbnail_url: thumbnailUrl,
       })
       .select()
@@ -249,14 +325,14 @@ router.patch('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Resp
   try {
     const user = req.user!
     const { id } = req.params
-    const { title, content, category_ids, published } = req.body
+    const { title, content, category_ids, published, is_allow_comment, is_private } = req.body
 
     // 게시글 소유자 확인
     const { data: post } = await supabase
       .from('posts')
       .select('blog_id')
       .eq('id', id)
-      .single()
+      .maybeSingle()
 
     if (!post) {
       res.status(404).json({ error: 'Post not found' })
@@ -267,7 +343,7 @@ router.patch('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Resp
       .from('blogs')
       .select('user_id')
       .eq('id', post.blog_id)
-      .single()
+      .maybeSingle()
 
     if (!blog || blog.user_id !== user.id) {
       res.status(403).json({ error: 'Not authorized to edit this post' })
@@ -278,13 +354,16 @@ router.patch('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Resp
     const authClient = createAuthenticatedClient(token)
 
     const updateData: Record<string, unknown> = {}
-    if (title !== undefined) updateData.title = title.trim()
+    if (title !== undefined) updateData.title = title.trim().slice(0, 200)
     if (content !== undefined) {
-      updateData.content = content
+      const validatedContent = content.slice(0, 100000)
+      updateData.content = validatedContent
       // content가 변경되면 썸네일도 업데이트
-      updateData.thumbnail_url = extractFirstImageUrl(content)
+      updateData.thumbnail_url = extractFirstImageUrl(validatedContent)
     }
     if (published !== undefined) updateData.published = published
+    if (is_allow_comment !== undefined) updateData.is_allow_comment = is_allow_comment
+    if (is_private !== undefined) updateData.is_private = is_private
 
     const { data, error } = await authClient
       .from('posts')

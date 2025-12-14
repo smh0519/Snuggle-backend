@@ -1,55 +1,64 @@
-import { Router, Response } from 'express'
+import { Router, Request, Response } from 'express'
 import { AuthenticatedRequest, authMiddleware } from '../middleware/auth.js'
 import { createAuthenticatedClient, supabase } from '../services/supabase.service.js'
 
 const router = Router()
 
-// 시스템 스킨 목록 조회 (인증 불필요)
-router.get('/', async (req, res): Promise<void> => {
+// 파라미터 검증 헬퍼 함수
+function validatePagination(limitStr: string | undefined, offsetStr: string | undefined): { limit: number; offset: number } {
+  const limit = Math.min(Math.max(1, parseInt(limitStr as string) || 20), 100)
+  const offset = Math.max(0, parseInt(offsetStr as string) || 0)
+  return { limit, offset }
+}
+
+// ===== 특정 경로 라우트 (/:id 보다 먼저 선언해야 함) =====
+
+// 마켓플레이스 스킨 목록 조회 (공개 스킨)
+router.get('/marketplace', async (req: Request, res: Response): Promise<void> => {
   try {
     const { data, error } = await supabase
       .from('blog_skins')
       .select('id, name, description, thumbnail_url, is_system, css_variables, layout_config, created_at')
-      .eq('is_system', true)
-      .order('created_at')
+      .eq('is_public', true)
+      .order('created_at', { ascending: false })
 
     if (error) {
       res.status(500).json({ error: error.message })
       return
     }
 
-    res.json(data)
+    res.json(data || [])
   } catch (error) {
-    console.error('Get skins error:', error)
-    res.status(500).json({ error: 'Failed to get skins' })
+    console.error('Get marketplace skins error:', error)
+    res.status(500).json({ error: 'Failed to get marketplace skins' })
   }
 })
 
-// 스킨 상세 조회 (인증 불필요)
-router.get('/:id', async (req, res): Promise<void> => {
+// 사용자 스킨 라이브러리 조회 (인증 필요)
+router.get('/library', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const { id } = req.params
+    const user = req.user!
 
     const { data, error } = await supabase
-      .from('blog_skins')
-      .select('id, name, description, thumbnail_url, is_system, css_variables, layout_config, created_at')
-      .eq('id', id)
-      .single()
+      .from('user_skin_library')
+      .select('skin_id, downloaded_at')
+      .eq('user_id', user.id)
+      .order('downloaded_at', { ascending: false })
 
     if (error) {
-      res.status(404).json({ error: 'Skin not found' })
+      res.status(500).json({ error: error.message })
       return
     }
 
-    res.json(data)
+    res.json(data || [])
   } catch (error) {
-    console.error('Get skin error:', error)
-    res.status(500).json({ error: 'Failed to get skin' })
+    console.error('Get skin library error:', error)
+    res.status(500).json({ error: 'Failed to get skin library' })
   }
 })
 
 // 블로그에 적용된 스킨 조회 (인증 불필요)
-router.get('/blog/:blogId', async (req, res): Promise<void> => {
+router.get('/blog/:blogId', async (req: Request, res: Response): Promise<void> => {
   try {
     const { blogId } = req.params
 
@@ -71,14 +80,9 @@ router.get('/blog/:blogId', async (req, res): Promise<void> => {
         )
       `)
       .eq('blog_id', blogId)
-      .single()
+      .maybeSingle()
 
     if (error) {
-      // 적용된 스킨이 없으면 null 반환
-      if (error.code === 'PGRST116') {
-        res.json(null)
-        return
-      }
       res.status(500).json({ error: error.message })
       return
     }
@@ -106,7 +110,7 @@ router.post('/apply', authMiddleware, async (req: AuthenticatedRequest, res: Res
       .from('blogs')
       .select('user_id')
       .eq('id', blog_id)
-      .single()
+      .maybeSingle()
 
     if (!blog || blog.user_id !== user.id) {
       res.status(403).json({ error: 'Not authorized' })
@@ -118,7 +122,7 @@ router.post('/apply', authMiddleware, async (req: AuthenticatedRequest, res: Res
       .from('blog_skins')
       .select('id')
       .eq('id', skin_id)
-      .single()
+      .maybeSingle()
 
     if (!skin) {
       res.status(404).json({ error: 'Skin not found' })
@@ -167,7 +171,7 @@ router.patch('/customize/:blogId', authMiddleware, async (req: AuthenticatedRequ
       .from('blogs')
       .select('user_id')
       .eq('id', blogId)
-      .single()
+      .maybeSingle()
 
     if (!blog || blog.user_id !== user.id) {
       res.status(403).json({ error: 'Not authorized' })
@@ -182,7 +186,7 @@ router.patch('/customize/:blogId', authMiddleware, async (req: AuthenticatedRequ
       .from('blog_skin_applications')
       .select('id, skin_id')
       .eq('blog_id', blogId)
-      .single()
+      .maybeSingle()
 
     let result
     if (existing) {
@@ -210,7 +214,7 @@ router.patch('/customize/:blogId', authMiddleware, async (req: AuthenticatedRequ
         .select('id')
         .eq('name', '기본')
         .eq('is_system', true)
-        .single()
+        .maybeSingle()
 
       const { data, error } = await authClient
         .from('blog_skin_applications')
@@ -237,6 +241,60 @@ router.patch('/customize/:blogId', authMiddleware, async (req: AuthenticatedRequ
   }
 })
 
+// 스킨 다운로드 (라이브러리에 추가, 인증 필요)
+router.post('/download/:skinId', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!
+    const { skinId } = req.params
+
+    // 스킨 존재 확인
+    const { data: skin } = await supabase
+      .from('blog_skins')
+      .select('id')
+      .eq('id', skinId)
+      .maybeSingle()
+
+    if (!skin) {
+      res.status(404).json({ error: 'Skin not found' })
+      return
+    }
+
+    const token = req.headers.authorization!.split(' ')[1]
+    const authClient = createAuthenticatedClient(token)
+
+    // 이미 다운로드했는지 확인
+    const { data: existing } = await supabase
+      .from('user_skin_library')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('skin_id', skinId)
+      .maybeSingle()
+
+    if (existing) {
+      res.json({ success: true, message: 'Already downloaded' })
+      return
+    }
+
+    // 라이브러리에 추가
+    const { error } = await authClient
+      .from('user_skin_library')
+      .insert({
+        user_id: user.id,
+        skin_id: skinId,
+      })
+
+    if (error) {
+      res.status(500).json({ error: error.message })
+      return
+    }
+
+    res.json({ success: true })
+  } catch (error) {
+    console.error('Download skin error:', error)
+    res.status(500).json({ error: 'Failed to download skin' })
+  }
+})
+
 // 블로그 스킨 초기화 (인증 필요)
 router.delete('/blog/:blogId', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -248,7 +306,7 @@ router.delete('/blog/:blogId', authMiddleware, async (req: AuthenticatedRequest,
       .from('blogs')
       .select('user_id')
       .eq('id', blogId)
-      .single()
+      .maybeSingle()
 
     if (!blog || blog.user_id !== user.id) {
       res.status(403).json({ error: 'Not authorized' })
@@ -272,6 +330,52 @@ router.delete('/blog/:blogId', authMiddleware, async (req: AuthenticatedRequest,
   } catch (error) {
     console.error('Reset skin error:', error)
     res.status(500).json({ error: 'Failed to reset skin' })
+  }
+})
+
+// ===== 일반 경로 라우트 =====
+
+// 시스템 스킨 목록 조회 (인증 불필요)
+router.get('/', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { data, error } = await supabase
+      .from('blog_skins')
+      .select('id, name, description, thumbnail_url, is_system, css_variables, layout_config, created_at')
+      .eq('is_system', true)
+      .order('created_at')
+
+    if (error) {
+      res.status(500).json({ error: error.message })
+      return
+    }
+
+    res.json(data)
+  } catch (error) {
+    console.error('Get skins error:', error)
+    res.status(500).json({ error: 'Failed to get skins' })
+  }
+})
+
+// 스킨 상세 조회 (인증 불필요) - 가장 마지막에 선언
+router.get('/:id', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params
+
+    const { data, error } = await supabase
+      .from('blog_skins')
+      .select('id, name, description, thumbnail_url, is_system, css_variables, layout_config, created_at')
+      .eq('id', id)
+      .maybeSingle()
+
+    if (error || !data) {
+      res.status(404).json({ error: 'Skin not found' })
+      return
+    }
+
+    res.json(data)
+  } catch (error) {
+    console.error('Get skin error:', error)
+    res.status(500).json({ error: 'Failed to get skin' })
   }
 })
 
